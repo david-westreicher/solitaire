@@ -4,9 +4,12 @@ from collections import defaultdict
 from copy import deepcopy
 import heapq
 from analyze import load_state
+import pyautogui
+import time
 
+MOUSE_TIME = 0.5
 
-@dataclass(eq=True, frozen=True)
+@dataclass(eq=True, frozen=True, order=True)
 class Card:
     suite: str
     number: int
@@ -88,6 +91,7 @@ class Board:
 
         if change:
             self.normalize()
+        return change
 
     @property
     def is_finished(self):
@@ -132,14 +136,15 @@ class Board:
                     ):
                         s2.extend(s1[k:])
                         del s1[k:]
-                        yield self.clone(), (i, j)
+                        copy, normalized = self.clone()
+                        yield copy, (i, j, k, before, normalized)
                         s1.extend(s2[before:])
                         del s2[before:]
 
     def clone(self):
         copy = deepcopy(self)
-        copy.normalize()
-        return copy
+        normalized = copy.normalize()
+        return copy, normalized
 
     @property
     def score(self):
@@ -178,14 +183,17 @@ def generate_deck():
     assert len(deck) == 40, len(deck)
     return deck
 
+def take_screenshot():
+    # return "./monitor-1.png"
+    time.sleep(1)
+    from mss import mss
+    with mss() as sct:
+        sct.shot()
+    return "./monitor-1.png"
 
-def main():
-    """
-    cards = generate_deck()
-    shuffle(cards)
-    """
-    cards = [Card(c[0], int(c[1])) for c in load_state("./solitaire.png")]
-    print(cards)
+
+def compute_path(cards):
+    assert set(cards) == set(generate_deck())
     board = Board(cards)
     heap = [(board, [(board, None)])]
     seen = set()
@@ -193,13 +201,7 @@ def main():
     while heap:
         board, path = heapq.heappop(heap)
         if board.is_finished:
-            print("FINISHED!!!" * 100)
-            print(board)
-            for b, m in path:
-                print(m)
-                print(b)
-            print(len(path))
-            break
+            return path
         if count % 5000 == 0:
             print("wait")
             print(board)
@@ -210,6 +212,47 @@ def main():
         seen.add(compressed)
         for child, move in board.children():
             heapq.heappush(heap, (child, path + [(child, move)]))
+
+def execute_move(start_stack, end_stack, start_card, end_card, normalized):
+    START = (1170, 576)
+    COLUMN_OFFSET = 152
+    ROW_OFFSET = 31
+    WIDTH = 20
+    def calc_pos(stack, card):
+        if stack < 8:
+            x = START[0] + COLUMN_OFFSET * stack + WIDTH // 2
+            y = START[1] + ROW_OFFSET * card + WIDTH // 2
+        else:
+            stack -= 8
+            x = START[0] + COLUMN_OFFSET * stack + WIDTH // 2
+            y = START[1] - WIDTH * 12 + WIDTH // 2
+        return x,y
+    if normalized:
+        for y in range(3):
+            pyautogui.moveTo(START[0] +COLUMN_OFFSET * 3 + WIDTH//2, START[-1] + WIDTH * (-12 + y * 4), MOUSE_TIME)
+            pyautogui.click(button="left")
+    pyautogui.moveTo(*calc_pos(start_stack, start_card), MOUSE_TIME)
+    pyautogui.dragTo(*calc_pos(end_stack, end_card), MOUSE_TIME, button="left")
+    # pyautogui.moveTo(*calc_pos(end_stack, end_card), MOUSE_TIME)
+
+    
+    
+
+def main():
+    """
+    cards = generate_deck()
+    shuffle(cards)
+    """
+    screenshot = take_screenshot() # "./monitor-1.png"
+    cards = [Card(c[0], int(c[1])) for c in load_state(screenshot)]
+    path = compute_path(cards)
+    print("FINISHED!!!" * 100)
+    for b, m in path:
+        print(m)
+        print(b)
+        if not m: continue
+        execute_move(*m)
+    print(len(path))
 
 
 if __name__ == "__main__":

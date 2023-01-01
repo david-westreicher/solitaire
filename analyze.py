@@ -5,9 +5,9 @@ from train import initialize_model, MODEL_NAME
 from torchvision import transforms
 import torch
 
-START = (49, 270)
-COLUMN_OFFSET = 142.5
-ROW_OFFSET = 29
+START = (1170, 576)
+COLUMN_OFFSET = 152
+ROW_OFFSET = 31
 WIDTH = 20
 SUITE_MAP = {
     "box": ("B", 0),
@@ -27,10 +27,11 @@ def extract_imgs(file):
                     START[0] + j * (COLUMN_OFFSET),
                     START[1] + ROW_OFFSET * i,
                     START[0] + j * (COLUMN_OFFSET) + WIDTH,
-                    START[1] + ROW_OFFSET * (i + 1) - 6,
+                    START[1] + ROW_OFFSET * (i + 1) - 7,
                 )
                 cropped_imgs.append((img.crop(box), i, j))
                 draw.line(box, fill=128)
+        # img.show()
     return cropped_imgs
 
 
@@ -43,13 +44,16 @@ def predict_color(img):
             if sum(pixels[i, j]) >= 255 * 2:
                 pixels[i, j] = (255, 255, 255)
             else:
-                if pixels[i, j][0] > 255 // 2:
+                if pixels[i, j][0] > 255 * 2 // 3:
                     suite_cnt["R"] += 1
-                elif pixels[i, j][1] > 255 // 3:
+                elif pixels[i, j][1] > 255 * 2// 5:
                     suite_cnt["G"] += 1
                 else:
                     suite_cnt["B"] += 1
                 pixels[i, j] = (0, 0, 0)
+    colors = set(col for col, cnt in suite_cnt.items() if cnt > 20)
+    if "R" in colors and "G" in colors:
+        return "S",img
     return max(suite_cnt.items(), key=lambda x: x[1])[0], img
 
 
@@ -92,11 +96,13 @@ def load_state(file):
         num = predict_number(bw_img)
         if num in SUITE_MAP:
             suite, num = SUITE_MAP[num]
+        if suite == "S":
+            num = "1"
         img.save(f"imgs/{i}x{j}x{suite}x{num}.png")
         res.append(f"{suite}{num}")
     return res
 
 
 if __name__ == "__main__":
-    res = load_state("./solitaire.png")
+    res = load_state("./monitor-1.png")
     print(res)
