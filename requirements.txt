@@ -1,3 +1,6 @@
 Pillow==9.3.0
 torch==1.13.1
 torchvision==0.14.1
+mss==7.0.1
+PyAutoGUI==0.9.53
+Pebble==5.0.3

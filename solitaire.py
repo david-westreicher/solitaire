@@ -1,13 +1,36 @@
-from dataclasses import dataclass
-from random import shuffle
 from collections import defaultdict
+from concurrent.futures import TimeoutError
 from copy import deepcopy
+from dataclasses import dataclass
 import heapq
-from analyze import load_state
-import pyautogui
 import time
+from typing import Optional
+
+from analyze import (
+    COLUMN_OFFSET,
+    GAME_BOX,
+    ROW_OFFSET,
+    START,
+    WIDTH,
+    load_state_indirect,
+)
+from mss import mss
+from pebble import concurrent
+import pyautogui
+
 
 MOUSE_TIME = 0.5
+CLICK_TIME = 0.5
+
+
+@dataclass()
+class Move:
+    from_stack: int
+    from_card: int
+    to_stack: int
+    to_card: int
+    collect_suite: Optional[str] = None
+
 
 @dataclass(eq=True, frozen=True, order=True)
 class Card:
@@ -18,19 +41,12 @@ class Card:
         return f"{self.suite}{self.number}"
 
 
-SUITE_STACK = {
-    "R": 0,
-    "G": 1,
-    "B": 2,
-    "S": 3,
-}
-
-
 class Board:
-    def __init__(self, cards=None) -> None:
+    def __init__(self, cards=None, suite_stack=None) -> None:
         self.stacks = [[] for _ in range(8)]
         self.temp = [[] for _ in range(3)]
         self.finished = [[] for _ in range(4)]
+        self.suite_stack = ["S"] + (suite_stack or [])
 
         if not cards:
             return
@@ -45,17 +61,29 @@ class Board:
 
     def normalize(self):
         change = False
-        for s in self.stacks + self.temp:
+        for stack_num, s in enumerate(self.stacks + self.temp):
             if not s or s[-1].number == 0:
                 continue
             last = s[-1]
-            finished_stack = self.finished[SUITE_STACK[last.suite]]
+            finished_stack = (
+                self.finished[self.suite_stack.index(last.suite)]
+                if last.suite in self.suite_stack
+                else []
+            )
             if last.number == 1:
                 change = True
-                finished_stack.append(s.pop())
+                if last.suite not in self.suite_stack:
+                    self.suite_stack.append(last.suite)
+                self.finished[self.suite_stack.index(last.suite)].append(s.pop())
+                yield Move(
+                    stack_num, len(s), 11 + self.suite_stack.index(last.suite), 0
+                )
             elif finished_stack and finished_stack[-1].number + 1 == last.number:
                 change = True
                 finished_stack.append(s.pop())
+                yield Move(
+                    stack_num, len(s), 11 + self.suite_stack.index(last.suite), 0
+                )
 
         counter = defaultdict(list)
         for s in self.stacks + self.temp:
@@ -86,12 +114,12 @@ class Board:
                 s.pop()
             self.temp[tmp_collect_index] = [Card(suite, 0)] * 4
             change = True
+            yield Move(0, 0, 0, 0, collect_suite=suite)
         assert sum(len(s) for s in self.temp + self.stacks + self.finished) == 40
         assert all(len(s) <= 1 or all(c.number == 0 for c in s) for s in self.temp)
 
         if change:
-            self.normalize()
-        return change
+            yield from self.normalize()
 
     @property
     def is_finished(self):
@@ -136,19 +164,19 @@ class Board:
                     ):
                         s2.extend(s1[k:])
                         del s1[k:]
-                        copy, normalized = self.clone()
-                        yield copy, (i, j, k, before, normalized)
+                        copy, normalize_moves = self.clone()
+                        yield copy, [Move(i, k, j, before)] + normalize_moves
                         s1.extend(s2[before:])
                         del s2[before:]
 
     def clone(self):
         copy = deepcopy(self)
-        normalized = copy.normalize()
-        return copy, normalized
+        normalize_moves = list(copy.normalize())
+        return copy, normalize_moves
 
     @property
     def score(self):
-        return sum(len(s) for s in self.temp)
+        return sum(len(s) for s in self.finished)
 
     def __str__(self) -> str:
         rows = []
@@ -183,27 +211,27 @@ def generate_deck():
     assert len(deck) == 40, len(deck)
     return deck
 
+
 def take_screenshot():
     # return "./monitor-1.png"
-    time.sleep(1)
-    from mss import mss
     with mss() as sct:
         sct.shot()
+    time.sleep(2)
     return "./monitor-1.png"
 
 
-def compute_path(cards):
-    assert set(cards) == set(generate_deck())
-    board = Board(cards)
-    heap = [(board, [(board, None)])]
+@concurrent.process(timeout=20)
+def compute_path(cards, order):
+    board = Board(cards, suite_stack=order)
+    heap = [(0, 0, board, [(board, [])])]
     seen = set()
     count = 0
     while heap:
-        board, path = heapq.heappop(heap)
+        _, _, board, path = heapq.heappop(heap)
         if board.is_finished:
             return path
         if count % 5000 == 0:
-            print("wait")
+            print("wait", len(path))
             print(board)
         count += 1
         compressed = board.compress()
@@ -211,48 +239,87 @@ def compute_path(cards):
             continue
         seen.add(compressed)
         for child, move in board.children():
-            heapq.heappush(heap, (child, path + [(child, move)]))
+            heapq.heappush(
+                heap, (-child.score, len(path), child, path + [(child, move)])
+            )
 
-def execute_move(start_stack, end_stack, start_card, end_card, normalized):
-    START = (1170, 576)
-    COLUMN_OFFSET = 152
-    ROW_OFFSET = 31
-    WIDTH = 20
+
+def execute_move(move: Move):
+    CARD_WIDTH = 100
+    MOVE_START = (GAME_BOX[0] + START[0], GAME_BOX[1] + START[1])
+
     def calc_pos(stack, card):
         if stack < 8:
-            x = START[0] + COLUMN_OFFSET * stack + WIDTH // 2
-            y = START[1] + ROW_OFFSET * card + WIDTH // 2
-        else:
+            x = MOVE_START[0] + COLUMN_OFFSET * stack + CARD_WIDTH // 2
+            y = MOVE_START[1] + ROW_OFFSET * card + WIDTH // 2
+        elif stack < 11:
             stack -= 8
-            x = START[0] + COLUMN_OFFSET * stack + WIDTH // 2
-            y = START[1] - WIDTH * 12 + WIDTH // 2
-        return x,y
-    if normalized:
-        for y in range(3):
-            pyautogui.moveTo(START[0] +COLUMN_OFFSET * 3 + WIDTH//2, START[-1] + WIDTH * (-12 + y * 4), MOUSE_TIME)
-            pyautogui.click(button="left")
-    pyautogui.moveTo(*calc_pos(start_stack, start_card), MOUSE_TIME)
-    pyautogui.dragTo(*calc_pos(end_stack, end_card), MOUSE_TIME, button="left")
-    # pyautogui.moveTo(*calc_pos(end_stack, end_card), MOUSE_TIME)
+            x = MOVE_START[0] + COLUMN_OFFSET * stack + CARD_WIDTH // 2
+            y = MOVE_START[1] - WIDTH * 13 + WIDTH // 2
+        else:
+            stack -= 11
+            x = MOVE_START[0] + COLUMN_OFFSET * (stack + 4) + CARD_WIDTH // 2
+            y = MOVE_START[1] - WIDTH * 13 + WIDTH // 2
+        return x, y
 
-    
-    
+    if move.collect_suite:
+        suite_y = ["R", "G", "B"].index(move.collect_suite)
+        x = MOVE_START[0] + COLUMN_OFFSET * 3 + WIDTH // 2
+        y = MOVE_START[-1] + WIDTH * (-12 + suite_y * 4)
+        pyautogui.moveTo(x, y)
+        for _ in range(5):
+            pyautogui.mouseDown()
+            time.sleep(0.05)
+            pyautogui.mouseUp()
+            time.sleep(0.05)
+        time.sleep(0.5)
+    else:
+        from_x, from_y = calc_pos(move.from_stack, move.from_card)
+        to_x, to_y = calc_pos(move.to_stack, move.to_card)
+        pyautogui.moveTo(from_x, from_y)
+        pyautogui.mouseDown()
+        time.sleep(0.05)
+        pyautogui.moveTo(to_x, to_y)
+        time.sleep(0.05)
+        pyautogui.mouseUp()
+        time.sleep(0.05)
+
+
+def new_game():
+    x = GAME_BOX[2] - 20
+    y = GAME_BOX[3] - 20
+    pyautogui.moveTo(x, y)
+    pyautogui.dragTo(x, y, CLICK_TIME, button="left")
+
+
+def play_round():
+    screenshot = take_screenshot()
+    cards, order = load_state_indirect(screenshot)
+    cards = [Card(c[0], int(c[1])) for c in cards]
+    if set(cards) != set(generate_deck()):
+        print("PARSE ERROR")
+        return False
+    try:
+        path = compute_path(cards, order).result()
+    except TimeoutError:
+        print("TIMEOUT")
+        return False
+    print("FINISHED!!!" * 100, len(path))
+    for b, moves in path:
+        print(moves)
+        print(b)
+        for move in moves:
+            execute_move(move)
+    print(len(path))
+    return True
+
 
 def main():
-    """
-    cards = generate_deck()
-    shuffle(cards)
-    """
-    screenshot = take_screenshot() # "./monitor-1.png"
-    cards = [Card(c[0], int(c[1])) for c in load_state(screenshot)]
-    path = compute_path(cards)
-    print("FINISHED!!!" * 100)
-    for b, m in path:
-        print(m)
-        print(b)
-        if not m: continue
-        execute_move(*m)
-    print(len(path))
+    time.sleep(1)
+    while True:
+        play_round()
+        new_game()
+        time.sleep(5)
 
 
 if __name__ == "__main__":

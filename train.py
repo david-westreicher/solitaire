@@ -237,7 +237,7 @@ if __name__ == "__main__":
             test_data, batch_size=batch_size, shuffle=True, num_workers=4
         ),
     }
-    device = "cpu" # torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    device = "cpu"  # torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
     # Send the model to GPU
     model_ft = model_ft.to(device)
